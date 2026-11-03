@@ -1,0 +1,552 @@
+<script>
+  // --- SENARAI DATA 13 NEGERI & 3 WILAYAH PERSEKUTUAN ---
+  const STATE_DATA = [
+    { id: 'perlis', name: 'Perlis' },
+    { id: 'kedah', name: 'Kedah' },
+    { id: 'pulau_pinang', name: 'Pulau Pinang' },
+    { id: 'perak', name: 'Perak' },
+    { id: 'kelantan', name: 'Kelantan' },
+    { id: 'terengganu', name: 'Terengganu' },
+    { id: 'pahang', name: 'Pahang' },
+    { id: 'selangor', name: 'Selangor' },
+    { id: 'wp_kl', name: 'W.P. Kuala Lumpur' },
+    { id: 'wp_putrajaya', name: 'W.P. Putrajaya' },
+    { id: 'negeri_sembilan', name: 'Negeri Sembilan' },
+    { id: 'melaka', name: 'Melaka' },
+    { id: 'johor', name: 'Johor' },
+    { id: 'sarawak', name: 'Sarawak' },
+    { id: 'wp_labuan', name: 'W.P. Labuan' },
+    { id: 'sabah', name: 'Sabah' }
+  ];
+
+  // --- PEMATUH STATUS GLOBAL ---
+  let gameState = {
+    playerName: '',
+    playerClass: '',
+    score: 0,
+    lives: 3,
+    completedCount: 0,
+    totalPuzzle: 16,
+    timerSeconds: 0,
+    timerInterval: null,
+    isGameActive: false,
+    useMouseFallback: false,
+    heldCard: null,
+    recordSaved: false
+  };
+
+  // Pinch Gesture Threshold
+  const PINCH_THRESHOLD = 0.055; 
+  let isPinching = false;
+  let cursorCoords = { x: 0, y: 0 };
+
+  // DOM Elements
+  const webcamElement = document.getElementById('webcam');
+  const canvasElement = document.getElementById('output-canvas');
+  const canvasCtx = canvasElement.getContext('2d');
+  const virtualCursor = document.getElementById('virtual-cursor');
+  const cursorStatus = document.getElementById('cursor-status');
+  const handWarning = document.getElementById('hand-warning');
+
+  // Initialization upon window load
+  window.addEventListener('DOMContentLoaded', () => {
+    initMouseFallbackListeners();
+  });
+
+  // --- PEMULANAN PERMAINAN ---
+  function startGame() {
+    const nameInput = document.getElementById('player-name').value.trim();
+    const classInput = document.getElementById('player-class').value.trim();
+
+    if (!nameInput || !classInput) {
+      alert('Sila masukkan Nama Pemain dan Kelas terlebih dahulu!');
+      return;
+    }
+
+    gameState.playerName = nameInput;
+    gameState.playerClass = classInput;
+    gameState.score = 0;
+    gameState.lives = 3;
+    gameState.completedCount = 0;
+    gameState.timerSeconds = 0;
+    gameState.isGameActive = true;
+    gameState.heldCard = null;
+    gameState.recordSaved = false;
+
+    // Reset HUD
+    document.getElementById('hud-player-name').innerText = gameState.playerName;
+    document.getElementById('hud-player-class').innerText = gameState.playerClass;
+    document.getElementById('hud-score').innerText = '0';
+    document.getElementById('hud-lives').innerText = '❤️❤️❤️';
+    document.getElementById('hud-timer').innerText = '00:00';
+    document.getElementById('hud-progress').innerText = `0/${gameState.totalPuzzle}`;
+
+    // Tentukan paparan skrin
+    switchScreen('game-screen');
+
+    // Cipta Kad Puzzle secara rawak
+    renderShuffledCards();
+
+    // Reset Drop Zones
+    document.querySelectorAll('.drop-zone').forEach(zone => {
+      zone.classList.remove('matched', 'hovered');
+    });
+
+    // Mula Pemasa
+    startTimer();
+
+    // Mula Pengesanan Tangan MediaPipe Hands
+    initMediaPipeHands();
+  }
+
+  function switchScreen(screenId) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById(screenId).classList.add('active');
+  }
+
+  function renderShuffledCards() {
+    const deck = document.getElementById('cards-deck');
+    deck.innerHTML = '';
+
+    // Salin dan susun rawak array
+    const shuffled = [...STATE_DATA].sort(() => Math.random() - 0.5);
+
+    shuffled.forEach(item => {
+      const card = document.createElement('div');
+      card.className = 'puzzle-card';
+      card.innerText = item.name;
+      card.setAttribute('data-id', item.id);
+      card.id = `card-${item.id}`;
+      deck.appendChild(card);
+    });
+  }
+
+  // --- MEDIAPIPE HANDS & WEBCAM LOGIC ---
+  let hands = null;
+  let cameraUtils = null;
+
+  function initMediaPipeHands() {
+    if (gameState.useMouseFallback) return;
+
+    hands = new Hands({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+      maxNumHands: 1,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.6
+    });
+
+    hands.onResults(onHandResults);
+
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      cameraUtils = new Camera(webcamElement, {
+        onFrame: async () => {
+          if (gameState.isGameActive && !gameState.useMouseFallback) {
+            await hands.send({ image: webcamElement });
+          }
+        },
+        width: 320,
+        height: 240
+      });
+      cameraUtils.start().catch(err => {
+        console.warn('Webcam tidak dapat diakses, beralih ke tetikus:', err);
+        enableMouseFallbackAuto();
+      });
+    } else {
+      enableMouseFallbackAuto();
+    }
+  }
+
+  function onHandResults(results) {
+    canvasElement.width = webcamElement.videoWidth;
+    canvasElement.height = webcamElement.videoHeight;
+    canvasCtx.save();
+    canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+      handWarning.style.display = 'none';
+      const landmarks = results.multiHandLandmarks[0];
+
+      // Lukis mercu tanda tangan asas di atas canvas
+      drawLandmarks(canvasCtx, landmarks);
+
+      // Jari Telunjuk Tip (Index 8) & Ibu Jari Tip (Index 4)
+      const indexTip = landmarks[8];
+      const thumbTip = landmarks[4];
+
+      // Kirim koordinat penunjuk (Sistem Cermin X: 1 - x)
+      const mapRect = document.getElementById('map-container').getBoundingClientRect();
+      const screenX = mapRect.left + (1 - indexTip.x) * mapRect.width;
+      const screenY = mapRect.top + indexTip.y * mapRect.height;
+
+      updateVirtualCursor(screenX, screenY);
+
+      // Pengiraan Jarak Euclidian Antara Ibu Jari & Jari Telunjuk
+      const distance = Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y);
+
+      if (distance < PINCH_THRESHOLD) {
+        if (!isPinching) {
+          isPinching = true;
+          onPinchStart();
+        }
+      } else {
+        if (isPinching) {
+          isPinching = false;
+          onPinchEnd();
+        }
+      }
+    } else {
+      handWarning.style.display = 'block';
+      if (isPinching) {
+        isPinching = false;
+        onPinchEnd();
+      }
+    }
+    canvasCtx.restore();
+  }
+
+  function drawLandmarks(ctx, landmarks) {
+    ctx.fillStyle = '#ff7675';
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+
+    landmarks.forEach((lm) => {
+      const x = lm.x * ctx.canvas.width;
+      const y = lm.y * ctx.canvas.height;
+      ctx.beginPath();
+      ctx.arc(x, y, 4, 0, 2 * Math.PI);
+      ctx.fill();
+      ctx.stroke();
+    });
+  }
+
+  // --- KAWALAN VIRTUAL CURSOR & PINCH GESTURE ---
+  function updateVirtualCursor(x, y) {
+    cursorCoords.x = x;
+    cursorCoords.y = y;
+
+    const mapContainer = document.getElementById('map-container');
+    const rect = mapContainer.getBoundingClientRect();
+
+    // Relative to map container
+    const relX = x - rect.left;
+    const relY = y - rect.top;
+
+    virtualCursor.style.left = `${relX}px`;
+    virtualCursor.style.top = `${relY}px`;
+
+    // Jika sedang melebarkan/menyeret kad
+    if (gameState.heldCard) {
+      gameState.heldCard.style.position = 'fixed';
+      gameState.heldCard.style.left = `${x - 40}px`;
+      gameState.heldCard.style.top = `${y - 15}px`;
+    }
+
+    // Semak koordinat hovered drop-zone
+    checkZoneHover(x, y);
+  }
+
+  function onPinchStart() {
+    virtualCursor.classList.add('pinched');
+    cursorStatus.innerText = 'MEMEGANG';
+
+    // Semak sama ada kursor berada di atas mana-mana kad puzzle
+    const elementAtPoint = document.elementFromPoint(cursorCoords.x, cursorCoords.y);
+    if (elementAtPoint && elementAtPoint.classList.contains('puzzle-card') && !elementAtPoint.classList.contains('placed')) {
+      gameState.heldCard = elementAtPoint;
+      gameState.heldCard.classList.add('dragging');
+    }
+  }
+
+  function onPinchEnd() {
+    virtualCursor.classList.remove('pinched');
+    cursorStatus.innerText = 'BEBAS';
+
+    if (gameState.heldCard) {
+      const cardId = gameState.heldCard.getAttribute('data-id');
+      const targetZone = findHoveredZone(cursorCoords.x, cursorCoords.y);
+
+      if (targetZone) {
+        const zoneId = targetZone.getAttribute('data-id');
+        evaluateAnswer(cardId, zoneId, gameState.heldCard, targetZone);
+      } else {
+        // Kembalikan kad ke dalam deck jika dilepaskan di luar zone
+        resetHeldCardPosition(gameState.heldCard);
+      }
+
+      gameState.heldCard.classList.remove('dragging');
+      gameState.heldCard = null;
+    }
+  }
+
+  function resetHeldCardPosition(card) {
+    card.style.position = 'static';
+    card.style.left = 'auto';
+    card.style.top = 'auto';
+  }
+
+  // --- SEMAKAN TEPAT ZON (DROP ZONE HOVER & EVALUATION) ---
+  function findHoveredZone(x, y) {
+    const zones = document.querySelectorAll('.drop-zone:not(.matched)');
+    for (let zone of zones) {
+      const rect = zone.getBoundingClientRect();
+      if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+        return zone;
+      }
+    }
+    return null;
+  }
+
+  function checkZoneHover(x, y) {
+    document.querySelectorAll('.drop-zone:not(.matched)').forEach(zone => {
+      const rect = zone.getBoundingClientRect();
+      if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+        zone.classList.add('hovered');
+      } else {
+        zone.classList.remove('hovered');
+      }
+    });
+  }
+
+  // --- PENILAIAN JAWAPAN (MARKAH & NYAWA) ---
+  function evaluateAnswer(cardId, zoneId, cardElement, zoneElement) {
+    if (cardId === zoneId) {
+      // JAWAPAN BETUL
+      gameState.score += 10;
+      gameState.completedCount += 1;
+      
+      cardElement.classList.add('placed');
+      zoneElement.classList.add('matched');
+      zoneElement.classList.remove('hovered');
+
+      showToast('TAHNIAH! JAWAPAN ANDA BETUL!', 'correct');
+
+      // Update HUD
+      document.getElementById('hud-score').innerText = gameState.score;
+      document.getElementById('hud-progress').innerText = `${gameState.completedCount}/${gameState.totalPuzzle}`;
+
+      // Semak Kemenangan
+      if (gameState.completedCount >= gameState.totalPuzzle) {
+        endGame(true);
+      }
+    } else {
+      // JAWAPAN SALAH
+      gameState.lives -= 1;
+      showToast('MAAF, CUBA LAGI!', 'wrong');
+      resetHeldCardPosition(cardElement);
+
+      // Update Lives HUD
+      updateLivesHUD();
+
+      if (gameState.lives <= 0) {
+        endGame(false);
+      }
+    }
+  }
+
+  function updateLivesHUD() {
+    let hearts = '';
+    for (let i = 0; i < gameState.lives; i++) {
+      hearts += '❤️';
+    }
+    document.getElementById('hud-lives').innerText = hearts || '💀';
+  }
+
+  function showToast(msg, type) {
+    const toast = document.getElementById('feedback-toast');
+    toast.innerText = msg;
+    toast.className = type === 'correct' ? 'toast-correct' : 'toast-wrong';
+
+    setTimeout(() => {
+      toast.className = 'toast-hidden';
+    }, 1500);
+  }
+
+  // --- PEMASA (TIMER) ---
+  function startTimer() {
+    clearInterval(gameState.timerInterval);
+    gameState.timerInterval = setInterval(() => {
+      gameState.timerSeconds++;
+      document.getElementById('hud-timer').innerText = formatTime(gameState.timerSeconds);
+    }, 1000);
+  }
+
+  function formatTime(totalSec) {
+    const mins = Math.floor(totalSec / 60);
+    const secs = totalSec % 60;
+    return `${mins < 10 ? '0' : ''}${mins}:${secs < 10 ? '0' : ''}${secs}`;
+  }
+
+  // --- ALTERNATIF KAEDAH TETIKUS (MOUSE FALLBACK) ---
+  function toggleMouseFallback() {
+    gameState.useMouseFallback = !gameState.useMouseFallback;
+    const badge = document.getElementById('control-badge');
+    
+    if (gameState.useMouseFallback) {
+      badge.innerHTML = '<i class="fa-solid fa-mouse"></i> Mode: Tetikus Manual';
+      handWarning.style.display = 'none';
+      alert('Mod Tetikus Diaktifkan. Anda boleh klik dan drag kad secara manual.');
+    } else {
+      badge.innerHTML = '<i class="fa-solid fa-video"></i> Mode: Webcam (Kamera)';
+      initMediaPipeHands();
+    }
+  }
+
+  function enableMouseFallbackAuto() {
+    gameState.useMouseFallback = true;
+    document.getElementById('control-badge').innerHTML = '<i class="fa-solid fa-mouse"></i> Mode: Tetikus Manual (Auto)';
+  }
+
+  function initMouseFallbackListeners() {
+    window.addEventListener('mousemove', (e) => {
+      if (gameState.isGameActive && gameState.useMouseFallback) {
+        updateVirtualCursor(e.clientX, e.clientY);
+      }
+    });
+
+    window.addEventListener('mousedown', (e) => {
+      if (gameState.isGameActive && gameState.useMouseFallback) {
+        onPinchStart();
+      }
+    });
+
+    window.addEventListener('mouseup', (e) => {
+      if (gameState.isGameActive && gameState.useMouseFallback) {
+        onPinchEnd();
+      }
+    });
+  }
+
+  // --- PENAMATAN PERMAINAN & MENYIMPAN REKOD ---
+  function endGame(isVictory) {
+    gameState.isGameActive = false;
+    clearInterval(gameState.timerInterval);
+
+    const titleEl = document.getElementById('end-status-title');
+    const iconEl = document.getElementById('end-icon');
+
+    if (isVictory) {
+      titleEl.innerText = 'TAHNIAH! ANDA MENANG!';
+      titleEl.style.color = '#27ae60';
+      iconEl.innerHTML = '<i class="fa-solid fa-trophy" style="color: #f1c40f;"></i>';
+    } else {
+      titleEl.innerText = 'TAMAT PERMAINAN!';
+      titleEl.style.color = '#e74c3c';
+      iconEl.innerHTML = '<i class="fa-solid fa-face-frown" style="color: #e74c3c;"></i>';
+    }
+
+    document.getElementById('end-name').innerText = gameState.playerName;
+    document.getElementById('end-class').innerText = gameState.playerClass;
+    document.getElementById('end-score').innerText = gameState.score;
+    document.getElementById('end-time').innerText = formatTime(gameState.timerSeconds);
+    document.getElementById('end-lives').innerText = gameState.lives;
+
+    switchScreen('end-screen');
+
+    // Hantar rekod ke Google Sheets sekali sahaja
+    if (!gameState.recordSaved) {
+      gameState.recordSaved = true;
+      saveRecordToSheets();
+    }
+  }
+
+  function saveRecordToSheets() {
+    const record = {
+      name: gameState.playerName,
+      playerClass: gameState.playerClass,
+      score: gameState.score,
+      timeFormatted: formatTime(gameState.timerSeconds),
+      timeSeconds: gameState.timerSeconds,
+      lives: gameState.lives
+    };
+
+    const statusEl = document.getElementById('save-status');
+    statusEl.innerText = 'Menyimpan rekod ke Google Sheets...';
+    statusEl.style.color = '#f39c12';
+
+    if (typeof google !== 'undefined' && google.script && google.script.run) {
+      google.script.run
+        .withSuccessHandler((res) => {
+          if (res.success) {
+            statusEl.innerText = '✅ Rekod Berjaya Disimpan!';
+            statusEl.style.color = '#27ae60';
+          } else {
+            statusEl.innerText = '⚠️ Gagal menyimpan: ' + res.message;
+            statusEl.style.color = '#c0392b';
+          }
+        })
+        .withFailureHandler((err) => {
+          statusEl.innerText = '❌ Ralat Rangkaian/Apps Script!';
+          statusEl.style.color = '#c0392b';
+        })
+        .savePlayerRecord(record);
+    } else {
+      statusEl.innerText = 'ℹ️ Mod Ujian Tempatan (Google Script API Tidak Dikesan)';
+      statusEl.style.color = '#7f8c8d';
+    }
+  }
+
+  // --- LEADERBOARD & MODALS ---
+  function loadAndShowLeaderboard() {
+    const modal = document.getElementById('leaderboard-modal');
+    const tbody = document.getElementById('leaderboard-body');
+    modal.style.display = 'flex';
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;">Memuatkan data dari Google Sheets...</td></tr>';
+
+    if (typeof google !== 'undefined' && google.script && google.script.run) {
+      google.script.run
+        .withSuccessHandler((data) => {
+          if (!data || data.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;">Belum ada rekod pemain.</td></tr>';
+            return;
+          }
+
+          let html = '';
+          data.forEach(item => {
+            html += `
+              <tr>
+                <td><strong>#${item.rank}</strong></td>
+                <td>${escapeHtml(item.name)}</td>
+                <td>${escapeHtml(item.playerClass)}</td>
+                <td><strong style="color:#27ae60;">${item.score}</strong></td>
+                <td>${item.timeFormatted}</td>
+                <td>${item.lives} ❤️</td>
+              </tr>
+            `;
+          });
+          tbody.innerHTML = html;
+        })
+        .withFailureHandler(() => {
+          tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:red;">Gagal memuatkan leaderboard.</td></tr>';
+        })
+        .getLeaderboard();
+    } else {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;">Leaderboard hanya tersedia dalam Google Apps Script Web App.</td></tr>';
+    }
+  }
+
+  function showInstructions() {
+    document.getElementById('instructions-modal').style.display = 'flex';
+  }
+
+  function closeModal(modalId) {
+    document.getElementById(modalId).style.display = 'none';
+  }
+
+  function restartGame() {
+    startGame();
+  }
+
+  function goHome() {
+    clearInterval(gameState.timerInterval);
+    gameState.isGameActive = false;
+    switchScreen('home-screen');
+  }
+
+  function escapeHtml(str) {
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+</script>
